@@ -1,0 +1,370 @@
+#!python
+"""Provides command line flags to customize the training pipleine"""
+
+import os
+from absl import app
+from absl import flags
+
+FLAGS = flags.FLAGS
+
+flags.DEFINE_string(
+    'src',
+    os.environ.get('SRC_DIR', ''),
+    'Dataset source directory. Target of ImageDataGenerator.flow_from_directory'
+)
+
+flags.DEFINE_string(
+    'artifacts_dir',
+    os.environ.get('ARTIFACTS_DIR', ''),
+    'Destination directory for checkpoints / Tensorboard logs'
+)
+
+flags.DEFINE_bool(
+    'resnet',
+    True,
+    'If true, use a Resnet style network'
+)
+
+flags.DEFINE_bool(
+    'inception',
+    False,
+    'If true, use an Inception style network'
+)
+
+flags.DEFINE_integer(
+    'width',
+    32,
+    'Network width at output of tail'
+)
+
+flags.DEFINE_bool(
+    'dry',
+    False,
+    ('If true, dont write Tensorboard logs or checkpoint files. '
+    'Use this to experiment without worrying about writing artifacts')
+)
+
+flags.DEFINE_integer(
+    'batch_size',
+    32,
+    'Batch size for training'
+)
+
+flags.DEFINE_integer(
+    'image_dim',
+    64,
+    'Dimension in pixels of the square training images'
+)
+
+flags.DEFINE_bool(
+    'summary',
+    False,
+    ('Print/save a model layer summary and exit. '
+    'Model summary will be saved in artifact directory')
+)
+
+flags.DEFINE_bool(
+    'tune',
+    False,
+    'Reserved for future use. Hyperparameter tuning'
+)
+
+flags.DEFINE_list(
+    'levels',
+    [3, 6, 4],
+    ('Levels to use in the TraderNet encoder architecture. '
+    'ie. --levels=3,6,4 for 3 levels of downsampling with 3,6,4'
+    'bottleneck blocks for the respective levels')
+)
+
+flags.DEFINE_integer(
+    'classes',
+    61,
+    'Number of output classes if running in classification mode.'
+)
+
+flags.DEFINE_integer(
+    'epochs',
+    100,
+    'Number of training epochs'
+)
+
+flags.DEFINE_float(
+    'validation_split',
+    0.1,
+    'Fraction of dataset to reserve for validation'
+)
+
+flags.DEFINE_bool(
+    'adam',
+    False,
+    'Use the Adam optimizer'
+)
+
+flags.DEFINE_bool(
+    'rmsprop',
+    False,
+    'Use the RMSProp optimizer'
+)
+
+flags.DEFINE_float(
+    'lr',
+    0.001,
+    'Initial learning rate'
+)
+
+flags.DEFINE_float(
+    'epsilon',
+    1.0,
+    'Epsilon value for Adam/RMSProp optimizer'
+)
+
+flags.DEFINE_float(
+    'beta1',
+    0.9,
+    'Beta 1 value for Adam optimizer'
+)
+
+flags.DEFINE_float(
+    'beta2',
+    0.999,
+    'Beta 2 value for Adam optimizer'
+)
+
+flags.DEFINE_float(
+    'rho',
+    0.9,
+    'Rho value for RMSProp optimizer'
+)
+
+flags.DEFINE_float(
+    'lr_decay_coeff',
+    0.94,
+    ('Coefficient for learning rate decay. '
+     'LR decay is given by e^(coeff * (epoch - interval)). '
+     'Defaults to 0.94 as in Inception Resnet paper. '
+     'Set to None for no decay.')
+)
+
+flags.DEFINE_integer(
+    'lr_decay_freq',
+    2,
+    ('Number of epochs between learning rate decay. '
+     'Defaults to 2 as in Inception Resnet paper')
+)
+
+flags.DEFINE_float(
+    'lr_decay_min',
+    0.0001,
+    'Minimum LR after decay'
+)
+
+flags.DEFINE_string(
+    'early_stopping',
+    None,
+    'Metric to watch for early stopping. Ex: loss'
+)
+
+flags.DEFINE_integer(
+    'stopping_patience',
+    5,
+    'Epochs to wait before stopping if metric does not improve'
+)
+
+flags.DEFINE_float(
+    'stopping_change',
+    0.01,
+    'Minimum change in watched metric to be considered an improvement'
+)
+
+flags.DEFINE_float(
+    'l1',
+    None,
+    'L1 norm for head'
+)
+
+flags.DEFINE_float(
+    'l2',
+    None,
+    'L2 norm for head'
+)
+
+flags.DEFINE_float(
+    'dropout',
+    None,
+    'Dropout ratio'
+)
+
+flags.DEFINE_integer(
+    'seed',
+    42,
+    'If set, the integer to seed all random generators with'
+)
+
+flags.DEFINE_string(
+    'checkpoint_fmt',
+    'tin_{epoch:03d}.hdf5',
+    'Filename format to use when writing checkpoints'
+)
+
+flags.DEFINE_string(
+    'checkpoint_freq',
+    'epoch',
+    'Checkpoint frequency passed to tf.keras.callbacks.ModelCheckpoint'
+)
+
+flags.DEFINE_string(
+    'tb_update_freq',
+    'epoch',
+    'Update frequency passed to tf.keras.callbacks.TensorBoard'
+)
+
+flags.DEFINE_string(
+    'resume',
+    None,
+    'Resume from the specified model checkpoint filepath'
+)
+
+flags.DEFINE_bool(
+    'resume_last',
+    None,
+    'Attempt to resume from the most recent checkpoint'
+)
+
+flags.register_validator(
+    'src',
+    lambda v: os.path.isdir(v) and os.access(v, os.R_OK),
+    message='--src must point to an existing directory'
+)
+
+flags.register_validator(
+    'artifacts_dir',
+    lambda v: os.path.isdir(v) and os.access(v, os.W_OK),
+    message='--artifacts_dir must point to an existing directory'
+)
+
+flags.register_validator(
+    'batch_size',
+    lambda v: v > 0,
+    message='--batch_size must be an int > 0'
+)
+
+flags.register_validator(
+    'levels',
+    lambda v: len(v) > 0,
+    message='--levels must be a non-empty list of integers'
+)
+
+flags.register_validator(
+    'classes',
+    lambda v: v > 0,
+    message='--classes must be an integer > 0'
+)
+
+flags.register_validator(
+    'epochs',
+    lambda v: v > 0,
+    message='--epochs must be an integer > 0'
+)
+
+flags.register_validator(
+    'validation_split',
+    lambda v: v >= 0,
+    message='--validation_split must be a float on interval (0, 1)'
+)
+
+flags.register_validator(
+    'validation_split',
+    lambda v: v > 0,
+    message='--image_dim must be an int > 0'
+)
+
+flags.register_validator(
+    'lr',
+    lambda v: 0 < v < 1.0,
+    message='--lr must be an float on interval (0.0, 1.0)'
+)
+
+flags.register_validator(
+    'epsilon',
+    lambda v: float(v) >= 0,
+    message='--epsilon must be a float >= 0)'
+)
+
+flags.register_validator(
+    'beta1',
+    lambda v: float(v) >= 0,
+    message='--beta1 must be an float >= 0)'
+)
+
+flags.register_validator(
+    'beta2',
+    lambda v: float(v) >= 0,
+    message='--beta2 must be an float >= 0)'
+)
+
+flags.register_validator(
+    'rho',
+    lambda v: float(v) >= 0,
+    message='--rho must be an float >= 0)'
+)
+
+flags.register_validator(
+    'lr_decay_coeff',
+    lambda v: v == None or float(v) > 0,
+    message='--lr_decay_coeff must None or float > 0'
+)
+
+flags.register_validator(
+    'lr_decay_freq',
+    lambda v: int(v) > 0,
+    message='--lr_decay_freq must int > 0'
+)
+
+flags.register_validator(
+    'lr_decay_min',
+    lambda v: float(v) > 0 and float(v) < FLAGS.lr,
+    message='--lr_decay_min must float on (0, --lr)'
+)
+
+flags.register_validator(
+    'l1',
+    lambda v: v == None or v > 0,
+    message='--l1 must be a float > 0. Use l1=None for no regularization'
+)
+
+flags.register_validator(
+    'l2',
+    lambda v: v == None or v > 0,
+    message='--l2 must be a float > 0. Use l2=None for no regularization'
+)
+
+flags.register_validator(
+    'dropout',
+    lambda v: v == None or (float(v) > 0 and float(v) <= 1.0),
+    message='--dropout must be a float on [0, 1.0].'
+)
+
+flags.register_validator(
+    'seed',
+    lambda v: v == None or int(v) == v,
+    message='--seed must be None or an integer'
+)
+
+flags.register_validator(
+    'checkpoint_fmt',
+    lambda v: len(v) > 0,
+    message='--checkpoint_fmt must be a non-empty string'
+)
+
+flags.register_validator(
+    'resume',
+    lambda v: v == None or os.path.isfile(v),
+    message='--resume must point to an existing checkpoint file'
+)
+
+flags.register_validator(
+    'image_dim',
+    lambda v: v > 0,
+    message='--image_dim must be an int > 0'
+)

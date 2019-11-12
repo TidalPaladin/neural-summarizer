@@ -1,0 +1,42 @@
+version: '2.3'
+
+services:
+
+  neural-sum:
+    build:
+      context: ./
+      args:
+        upstream: 2.0.0-gpu-py3
+    container_name: neural-sum
+    tty: true
+    stdin_open: true
+    volumes:
+      - type: bind
+        source: ${SRC_DIR}
+        target: /data/src
+        read_only: true
+      - type: bind
+        source: ${ARTIFACT_DIR}
+        target: /artifacts
+    runtime: nvidia
+    # Env vars are read from .env file
+    environment:
+      - CUDA_VISIBLE_DEVICES=1
+      - SRC_DIR=/data/src
+      - ARTIFACTS_DIR=/artifacts
+
+  tensorboard:
+    image: tensorflow/tensorflow:2.0.0rc0-gpu-py3
+    container_name: tensorboard
+    tty: true
+    volumes:
+      - type: bind
+        source: ${ARTIFACT_DIR}
+        target: /artifacts
+        read_only: true
+    ports:
+      - 6006:6006
+    runtime: nvidia
+    command: tensorboard --logdir=/artifacts/tblogs
+    environment:
+      - ARTIFACTS_DIR=/artifacts
