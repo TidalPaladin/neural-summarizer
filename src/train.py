@@ -15,6 +15,7 @@ import torch
 from pytorch_pretrained_bert import BertConfig
 
 import distributed
+from flags import parser
 from models import data_loader, model_builder
 from models.data_loader import load_dataset
 from models.model_builder import Summarizer
@@ -23,20 +24,21 @@ from others.logging import logger, init_logger
 
 model_flags = ['hidden_size', 'ff_size', 'heads', 'inter_layers','encoder','ff_actv', 'use_interval','rnn_size']
 
-
-def str2bool(v):
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-
+def log_runtime_info():
+    logger.info("Encoder: %s", args.encoder)
+    logger.info("Mode: %s", args.mode)
+    logger.info("Dataset path: %s", args.src_path)
+    logger.info("Model path: %s", args.model_path)
+    logger.info("Result path: %s", args.result_path)
+    logger.info("Log file: %s", args.log_file)
+    logger.info("Temp dir: %s", args.temp_dir)
+    logger.info("BERT config: %s", args.bert_config_path)
+    logger.info("Batch size: %s", args.batch_size)
 
 def multi_main(args):
     """ Spawns 1 process per GPU """
     init_logger()
+    log_runtime_info()
 
     nb_gpu = args.world_size
     mp = torch.multiprocessing.get_context('spawn')
@@ -232,6 +234,7 @@ def baseline(args, cal_lead=False, cal_oracle=False):
 
 def train(args, device_id):
     init_logger(args.log_file)
+    log_runtime_info()
 
     device = "cpu" if args.visible_gpus == '-1' else "cuda"
     logger.info('Device ID %d' % device_id)
@@ -274,65 +277,13 @@ def train(args, device_id):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-
-
-
-    parser.add_argument("-encoder", default='classifier', type=str, choices=['classifier','transformer','rnn','baseline'])
-    parser.add_argument("-mode", default='train', type=str, choices=['train','validate','test'])
-    parser.add_argument("-bert_data_path", default='/data/cnndm')
-    parser.add_argument("-model_path", default='/artifacts/models/')
-    parser.add_argument("-result_path", default='/artifacts/results/cnndm')
-    parser.add_argument("-temp_dir", default='/artifacts/tmp')
-    parser.add_argument("-bert_config_path", default='/app/bert_config_uncased_base.json')
-
-    parser.add_argument("-batch_size", default=1000, type=int)
-
-    parser.add_argument("-use_interval", type=str2bool, nargs='?',const=True,default=True)
-    parser.add_argument("-hidden_size", default=128, type=int)
-    parser.add_argument("-ff_size", default=512, type=int)
-    parser.add_argument("-heads", default=4, type=int)
-    parser.add_argument("-inter_layers", default=2, type=int)
-    parser.add_argument("-rnn_size", default=512, type=int)
-
-    parser.add_argument("-param_init", default=0, type=float)
-    parser.add_argument("-param_init_glorot", type=str2bool, nargs='?',const=True,default=True)
-    parser.add_argument("-dropout", default=0.1, type=float)
-    parser.add_argument("-optim", default='adam', type=str)
-    parser.add_argument("-lr", default=1, type=float)
-    parser.add_argument("-beta1", default= 0.9, type=float)
-    parser.add_argument("-beta2", default=0.999, type=float)
-    parser.add_argument("-decay_method", default='', type=str)
-    parser.add_argument("-warmup_steps", default=8000, type=int)
-    parser.add_argument("-max_grad_norm", default=0, type=float)
-
-    parser.add_argument("-save_checkpoint_steps", default=5, type=int)
-    parser.add_argument("-accum_count", default=1, type=int)
-    parser.add_argument("-world_size", default=1, type=int)
-    parser.add_argument("-report_every", default=1, type=int)
-    parser.add_argument("-train_steps", default=1000, type=int)
-    parser.add_argument("-recall_eval", type=str2bool, nargs='?',const=True,default=False)
-
-
-    parser.add_argument('-visible_gpus', default='1', type=str)
-    parser.add_argument('-gpu_ranks', default='0', type=str)
-    parser.add_argument('-log_file', default='/artifacts/logs/cnndm.log')
-    parser.add_argument('-dataset', default='')
-    parser.add_argument('-seed', default=666, type=int)
-
-    parser.add_argument("-test_all", type=str2bool, nargs='?',const=True,default=False)
-    parser.add_argument("-test_from", default='')
-    parser.add_argument("-train_from", default='')
-    parser.add_argument("-report_rouge", type=str2bool, nargs='?',const=True,default=True)
-    parser.add_argument("-block_trigram", type=str2bool, nargs='?', const=True, default=True)
-
     args = parser.parse_args()
     args.gpu_ranks = [int(i) for i in args.gpu_ranks.split(',')]
     os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpus
 
-    init_logger(args.log_file)
     device = "cpu" if args.visible_gpus == '-1' else "cuda"
     device_id = 0 if device == "cuda" else -1
+
 
     if(args.world_size>1):
         multi_main(args)

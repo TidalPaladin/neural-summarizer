@@ -3,6 +3,7 @@ version: '2.3'
 services:
 
   bertsum:
+    image: bertsum:latest
     build:
       context: ./
       args:
@@ -22,6 +23,5 @@ services:
     runtime: nvidia
     # Env vars are read from .env file
     environment:
-      - CUDA_VISIBLE_DEVICES=
       - SRC_DIR=/data
       - ARTIFACT_DIR=/artifacts
