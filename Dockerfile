@@ -5,6 +5,9 @@ COPY requirements.txt /app/requirements.txt
 WORKDIR /app
 RUN pip install -r requirements.txt
 
+# Required for ROUGE
+RUN apt-get -y update && apt-get install -y libxml-parser-perl
+
 COPY [ "docker/run.sh", "docker/entrypoint.sh", "/" ]
 COPY bert_config_uncased_base.json /app/
 

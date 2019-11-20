@@ -4,11 +4,10 @@ import numpy as np
 import torch
 from tensorboardX import SummaryWriter
 
-import distributed
-# import onmt
-from models.reporter import ReportMgr
-from models.stats import Statistics
-from others.logging import logger
+import onmt.utils.distributed as distributed
+from onmt.utils.report_manager import ReportMgr
+from onmt.utils.statistics import Statistics
+from onmt.utils.logging import logger
 from others.utils import test_rouge, rouge_results_to_str
 
 
@@ -17,8 +16,7 @@ def _tally_parameters(model):
     return n_params
 
 
-def build_trainer(args, device_id, model,
-                  optim):
+def build_trainer(args, device_id, model, optim):
     """
     Simplify `Trainer` creation based on user `opt`s*
     Args:
@@ -51,7 +49,7 @@ def build_trainer(args, device_id, model,
 
     report_manager = ReportMgr(args.report_every, start_time=-1, tensorboard_writer=writer)
 
-    trainer = Trainer(args, model, optim, grad_accum_count, n_gpu, gpu_rank, report_manager)
+    trainer = Trainer(args, model, optim, device, grad_accum_count, n_gpu, gpu_rank, report_manager)
 
     # print(tr)
     if (model):
@@ -86,7 +84,7 @@ class Trainer(object):
                 Thus nothing will be saved if this parameter is None
     """
 
-    def __init__(self,  args, model,  optim,
+    def __init__(self,  args, model,  optim, device=None,
                   grad_accum_count=1, n_gpu=1, gpu_rank=1,
                   report_manager=None):
         # Basic attributes.
@@ -94,6 +92,7 @@ class Trainer(object):
         self.save_checkpoint_steps = args.save_checkpoint_steps
         self.model = model
         self.optim = optim
+        self.device = device
         self.grad_accum_count = grad_accum_count
         self.n_gpu = n_gpu
         self.gpu_rank = gpu_rank
@@ -123,53 +122,58 @@ class Trainer(object):
         Return:
             None
         """
-        logger.info('Start training...')
 
-        # step =  self.optim._step + 1
-        step =  self.optim._step + 1
+        step =  self.optim.training_step + 1
         true_batchs = []
         accum = 0
         normalization = 0
         train_iter = train_iter_fct()
 
-        total_stats = Statistics()
-        report_stats = Statistics()
+        total_stats, report_stats = Statistics(), Statistics()
         self._start_report_manager(start_time=total_stats.start_time)
 
         while step <= train_steps:
 
             reduce_counter = 0
             for i, batch in enumerate(train_iter):
-                if self.n_gpu == 0 or (i % self.n_gpu == self.gpu_rank):
 
-                    true_batchs.append(batch)
-                    normalization += batch.batch_size
-                    accum += 1
-                    if accum == self.grad_accum_count:
-                        reduce_counter += 1
-                        if self.n_gpu > 1:
-                            normalization = sum(distributed
-                                                .all_gather_list
-                                                (normalization))
+                # Pick batch for this GPU if applicable
+                if self._should_skip_batch(i): continue
 
-                        self._gradient_accumulation(
-                            true_batchs, normalization, total_stats,
-                            report_stats)
+                _, batch_size = batch
+                true_batchs.append(batch)
+                normalization += batch_size
+                accum += 1
+                if accum == self.grad_accum_count:
+                    reduce_counter += 1
+                    if self.n_gpu > 1:
+                        normalization = sum(distributed
+                                            .all_gather_list
+                                            (normalization))
 
-                        report_stats = self._maybe_report_training(
-                            step, train_steps,
-                            self.optim.learning_rate,
-                            report_stats)
+                    self._gradient_accumulation(
+                        true_batchs, normalization, total_stats,
+                        report_stats, step)
 
-                        true_batchs = []
-                        accum = 0
-                        normalization = 0
-                        if (step % self.save_checkpoint_steps == 0 and self.gpu_rank == 0):
-                            self._save(step)
+                    report_stats = self._maybe_report_training(
+                        step, train_steps,
+                        self.optim.learning_rate(),
+                        report_stats)
 
-                        step += 1
-                        if step > train_steps:
-                            break
+                    true_batchs = []
+                    accum = 0
+                    normalization = 0
+
+                    # Save checkpoint if applicable on one GPU
+                    if (step % self.save_checkpoint_steps == 0 and self.gpu_rank == 0):
+                        self._save(step)
+
+                    step += 1
+
+                    # Break loop if hit training step limit
+                    if step > train_steps: break
+
+            # Reset dataset iterator if necessary
             train_iter = train_iter_fct()
 
         return total_stats
@@ -187,14 +191,11 @@ class Trainer(object):
         with torch.no_grad():
             for batch in valid_iter:
 
-                src = batch.src
-                labels = batch.labels
-                segs = batch.segs
-                clss = batch.clss
-                mask = batch.mask
-                mask_cls = batch.mask_cls
+                data, batch_size = batch
+                data = [t.to(self.device) for t in data[:-2]]
+                word_ids, mask, labels, segment_ids, cls_indices, mask_cls = data[:-2]
 
-                sent_scores, mask = self.model(src, segs, clss, mask, mask_cls)
+                sent_scores, mask = self.model(word_ids, segment_ids, cls_indices, mask, mask_cls, step)
 
 
                 loss = self.loss(sent_scores, labels.float())
@@ -233,28 +234,24 @@ class Trainer(object):
 
         can_path = '%s_step%d.candidate'%(self.args.result_path,step)
         gold_path = '%s_step%d.gold' % (self.args.result_path, step)
-        with open(can_path, 'w') as save_pred:
-            with open(gold_path, 'w') as save_gold:
+        with open(can_path, 'w', encoding='utf-8') as save_pred:
+            with open(gold_path, 'w', encoding='utf-8') as save_gold:
                 with torch.no_grad():
                     for batch in test_iter:
-                        src = batch.src
-                        labels = batch.labels
-                        segs = batch.segs
-                        clss = batch.clss
-                        mask = batch.mask
-                        mask_cls = batch.mask_cls
 
+                        data, batch_size = batch
+                        data = [t.to(self.device) for t in data[:-2]] + [data[-2], data[-1]]
+                        word_ids, mask, labels, segment_ids, cls_indices, mask_cls, src_str, tgt_str = data
 
-                        gold = []
-                        pred = []
+                        gold, pred = [], []
 
                         if (cal_lead):
-                            selected_ids = [list(range(batch.clss.size(1)))] * batch.batch_size
+                            selected_ids = [list(range(cls_indices.size(1)))] * batch_size
                         elif (cal_oracle):
-                            selected_ids = [[j for j in range(batch.clss.size(1)) if labels[i][j] == 1] for i in
-                                            range(batch.batch_size)]
+                            selected_ids = [[j for j in range(cls_indices.size(1)) if labels[i][j] == 1] for i in
+                                            range(batch_size)]
                         else:
-                            sent_scores, mask = self.model(src, segs, clss, mask, mask_cls)
+                            sent_scores, mask = self.model(word_ids, segment_ids, cls_indices, mask, mask_cls, step)
 
                             loss = self.loss(sent_scores, labels.float())
                             loss = (loss * mask.float()).sum()
@@ -267,12 +264,12 @@ class Trainer(object):
                         # selected_ids = np.sort(selected_ids,1)
                         for i, idx in enumerate(selected_ids):
                             _pred = []
-                            if(len(batch.src_str[i])==0):
+                            if(len(src_str[i])==0):
                                 continue
-                            for j in selected_ids[i][:len(batch.src_str[i])]:
-                                if(j>=len( batch.src_str[i])):
+                            for j in selected_ids[i][:len(src_str[i])]:
+                                if(j>=len(src_str[i])):
                                     continue
-                                candidate = batch.src_str[i][j].strip()
+                                candidate = src_str[i][j].strip()
                                 if(self.args.block_trigram):
                                     if(not _block_tri(candidate,_pred)):
                                         _pred.append(candidate)
@@ -284,10 +281,10 @@ class Trainer(object):
 
                             _pred = '<q>'.join(_pred)
                             if(self.args.recall_eval):
-                                _pred = ' '.join(_pred.split()[:len(batch.tgt_str[i].split())])
+                                _pred = ' '.join(_pred.split()[:len(tgt_str[i].split())])
 
                             pred.append(_pred)
-                            gold.append(batch.tgt_str[i])
+                            gold.append(tgt_str[i])
 
                         for i in range(len(gold)):
                             save_gold.write(gold[i].strip()+'\n')
@@ -301,9 +298,12 @@ class Trainer(object):
         return stats
 
 
+    def _should_skip_batch(self, batch_n):
+        return self.n_gpu != 0 and (batch_n % self.n_gpu != self.gpu_rank)
+
 
     def _gradient_accumulation(self, true_batchs, normalization, total_stats,
-                               report_stats):
+                               report_stats, step):
         if self.grad_accum_count > 1:
             self.model.zero_grad()
 
@@ -311,14 +311,11 @@ class Trainer(object):
             if self.grad_accum_count == 1:
                 self.model.zero_grad()
 
-            src = batch.src
-            labels = batch.labels
-            segs = batch.segs
-            clss = batch.clss
-            mask = batch.mask
-            mask_cls = batch.mask_cls
+            data, batch_size = batch
+            data = [t.to(self.device) for t in data]
+            word_ids, mask, labels, segment_ids, cls_indices, mask_cls = data
 
-            sent_scores, mask = self.model(src, segs, clss, mask, mask_cls)
+            sent_scores, mask = self.model(word_ids, segment_ids, cls_indices, mask, mask_cls, step)
 
             loss = self.loss(sent_scores, labels.float())
             loss = (loss*mask.float()).sum()

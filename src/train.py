@@ -1,58 +1,38 @@
 #!/usr/bin/env python
-"""
-    Main training workflow
-"""
-from __future__ import division
-
-import argparse
-import glob
 import os
-import random
 import signal
 import time
+
 
 import torch
 from pytorch_pretrained_bert import BertConfig
 
-import distributed
+import onmt.utils.distributed as distributed
+from onmt.utils.logging import logger, init_logger
+
 from flags import parser
-from models import data_loader, model_builder
-from models.data_loader import load_dataset
-from models.model_builder import Summarizer
+from models import data
+from models.model import load_model
 from models.trainer import build_trainer
-from others.logging import logger, init_logger
+from others.utils import seed
 
-model_flags = ['hidden_size', 'ff_size', 'heads', 'inter_layers','encoder','ff_actv', 'use_interval','rnn_size']
 
-def log_runtime_info():
-    logger.info("Encoder: %s", args.encoder)
-    logger.info("Mode: %s", args.mode)
-    logger.info("Dataset path: %s", args.src_path)
-    logger.info("Model path: %s", args.model_path)
-    logger.info("Result path: %s", args.result_path)
-    logger.info("Log file: %s", args.log_file)
-    logger.info("Temp dir: %s", args.temp_dir)
-    logger.info("BERT config: %s", args.bert_config_path)
-    logger.info("Batch size: %s", args.batch_size)
-
-def multi_main(args):
+def multi_main(func, args):
     """ Spawns 1 process per GPU """
     init_logger()
-    log_runtime_info()
-
     nb_gpu = args.world_size
     mp = torch.multiprocessing.get_context('spawn')
 
     # Create a thread to listen for errors in the child processes.
     error_queue = mp.SimpleQueue()
-    error_handler = ErrorHandler(error_queue)
+    error_handler = distributed.ErrorHandler(error_queue)
 
     # Train with multiprocessing.
     procs = []
     for i in range(nb_gpu):
         device_id = i
-        procs.append(mp.Process(target=run, args=(args,
-            device_id, error_queue,), daemon=True))
+        proc_args = (func, args, device_id, error_queue)
+        procs.append(mp.Process(target=run, args=proc_args, daemon=True))
         procs[i].start()
         logger.info(" Starting process pid: %d  " % procs[i].pid)
         error_handler.add_child(procs[i].pid)
@@ -60,8 +40,7 @@ def multi_main(args):
         p.join()
 
 
-
-def run(args, device_id, error_queue):
+def run(func, args, device_id, error_queue):
 
     """ run process """
     setattr(args, 'gpu_ranks', [int(i) for i in args.gpu_ranks])
@@ -73,14 +52,13 @@ def run(args, device_id, error_queue):
             raise AssertionError("An error occurred in \
                   Distributed initialization")
 
-        train(args,device_id)
+        func(args,device_id)
     except KeyboardInterrupt:
         pass  # killed by parent, do nothing
     except Exception:
         # propagate exception to parent process, keeping original traceback
         import traceback
         error_queue.put((args.gpu_ranks[device_id], traceback.format_exc()))
-
 
 class ErrorHandler(object):
     """A class that listens for exceptions in children processes and propagates
@@ -118,187 +96,78 @@ class ErrorHandler(object):
         raise Exception(msg)
 
 
+def evaluate(args, device_id, checkpoint, step, mode):
+    """ Evaluates a model in either validation or test mode """
 
-def wait_and_validate(args, device_id):
-
-    timestep = 0
-    if (args.test_all):
-        cp_files = sorted(glob.glob(os.path.join(args.model_path, 'model_step_*.pt')))
-        cp_files.sort(key=os.path.getmtime)
-        xent_lst = []
-        for i, cp in enumerate(cp_files):
-            step = int(cp.split('.')[-2].split('_')[-1])
-            xent = validate(args,  device_id, cp, step)
-            xent_lst.append((xent, cp))
-            max_step = xent_lst.index(min(xent_lst))
-            if (i - max_step > 10):
-                break
-        xent_lst = sorted(xent_lst, key=lambda x: x[0])[:3]
-        logger.info('PPL %s' % str(xent_lst))
-        for xent, cp in xent_lst:
-            step = int(cp.split('.')[-2].split('_')[-1])
-            test(args,  device_id, cp, step)
-    else:
-        while (True):
-            cp_files = sorted(glob.glob(os.path.join(args.model_path, 'model_step_*.pt')))
-            cp_files.sort(key=os.path.getmtime)
-            if (cp_files):
-                cp = cp_files[-1]
-                time_of_cp = os.path.getmtime(cp)
-                if (not os.path.getsize(cp) > 0):
-                    time.sleep(60)
-                    continue
-                if (time_of_cp > timestep):
-                    timestep = time_of_cp
-                    step = int(cp.split('.')[-2].split('_')[-1])
-                    validate(args,  device_id, cp, step)
-                    test(args,  device_id, cp, step)
-
-            cp_files = sorted(glob.glob(os.path.join(args.model_path, 'model_step_*.pt')))
-            cp_files.sort(key=os.path.getmtime)
-            if (cp_files):
-                cp = cp_files[-1]
-                time_of_cp = os.path.getmtime(cp)
-                if (time_of_cp > timestep):
-                    continue
-            else:
-                time.sleep(300)
-
-
-def validate(args,  device_id, pt, step):
-    device = "cpu" if args.visible_gpus == '-1' else "cuda"
-    if (pt != ''):
-        test_from = pt
-    else:
-        test_from = args.test_from
-    logger.info('Loading checkpoint from %s' % test_from)
-    checkpoint = torch.load(test_from, map_location=lambda storage, loc: storage)
-    opt = vars(checkpoint['opt'])
-    for k in opt.keys():
-        if (k in model_flags):
-            setattr(args, k, opt[k])
-    print(args)
-
-    config = BertConfig.from_json_file(args.bert_config_path)
-    model = Summarizer(args, device, load_pretrained_bert=False, bert_config = config)
-    model.load_cp(checkpoint)
-    model.eval()
-
-    valid_iter =data_loader.Dataloader(args, load_dataset(args, 'valid', shuffle=False),
-                                  args.batch_size, device,
-                                  shuffle=False, is_test=False)
-    trainer = build_trainer(args, device_id, model, None)
-    stats = trainer.validate(valid_iter, step)
-    return stats.xent()
-
-def test(args, device_id, pt, step):
+    if mode not in ['valid', 'test']:
+        raise ValueError('mode must be [test, valid], got %s' % mode)
 
     device = "cpu" if args.visible_gpus == '-1' else "cuda"
-    if (pt != ''):
-        test_from = pt
-    else:
-        test_from = args.test_from
-    logger.info('Loading checkpoint from %s' % test_from)
-    checkpoint = torch.load(test_from, map_location=lambda storage, loc: storage)
-    opt = vars(checkpoint['opt'])
-    for k in opt.keys():
-        if (k in model_flags):
-            setattr(args, k, opt[k])
-    print(args)
+
+    if checkpoint == '': checkpoint = args.test_from
+    logger.info("Evaluating (%s) from checkpoint %s", mode, checkpoint)
 
     config = BertConfig.from_json_file(args.bert_config_path)
-    model = Summarizer(args, device, load_pretrained_bert=False, bert_config = config)
-    model.load_cp(checkpoint)
+    model, _ = load_model(args, device, load_bert=False, checkpoint=checkpoint)
     model.eval()
 
-    test_iter =data_loader.Dataloader(args, load_dataset(args, 'test', shuffle=False),
-                                  args.batch_size, device,
-                                  shuffle=False, is_test=True)
+    dataset = data.load(args, mode, device)
     trainer = build_trainer(args, device_id, model, None)
-    trainer.test(test_iter,step)
 
+    if mode == 'valid':
+        stats = trainer.validate(dataset, step)
+    else:
+        stats = trainer.test(dataset, step)
 
-def baseline(args, cal_lead=False, cal_oracle=False):
-
-    test_iter =data_loader.Dataloader(args, load_dataset(args, 'test', shuffle=False),
-                                  args.batch_size, device,
-                                  shuffle=False, is_test=True)
-
-    trainer = build_trainer(args, device_id, None, None)
-    #
-    if (cal_lead):
-        trainer.test(test_iter, 0, cal_lead=True)
-    elif (cal_oracle):
-        trainer.test(test_iter, 0, cal_oracle=True)
+    return stats
 
 
 def train(args, device_id):
-    init_logger(args.log_file)
-    log_runtime_info()
-
+    """ Starts training pipeline given CLI args """
     device = "cpu" if args.visible_gpus == '-1' else "cuda"
     logger.info('Device ID %d' % device_id)
     logger.info('Device %s' % device)
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
-    torch.backends.cudnn.deterministic = True
+    seed(args.seed, device_id)
 
-    if device_id >= 0:
-        torch.cuda.set_device(device_id)
-        torch.cuda.manual_seed(args.seed)
+    def train_iter_fct(): return data.load(args, 'train', device)
 
-
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-
-    def train_iter_fct():
-        return data_loader.Dataloader(args, load_dataset(args, 'train', shuffle=True), args.batch_size, device,
-                                                 shuffle=True, is_test=False)
-
-    model = Summarizer(args, device, load_pretrained_bert=True)
     if args.train_from != '':
-        logger.info('Loading checkpoint from %s' % args.train_from)
-        checkpoint = torch.load(args.train_from,
-                                map_location=lambda storage, loc: storage)
-        opt = vars(checkpoint['opt'])
-        for k in opt.keys():
-            if (k in model_flags):
-                setattr(args, k, opt[k])
-        model.load_cp(checkpoint)
-        optim = model_builder.build_optim(args, model, checkpoint)
+        logger.info("Training from checkpoint %s", args.train_from)
+        model, optim = load_model(args, device, load_bert=True, checkpoint=args.train_from)
     else:
-        optim = model_builder.build_optim(args, model, None)
+        logger.info("Training without checkpoint")
+        model, optim = load_model(args, device, load_bert=True)
 
     logger.info(model)
     trainer = build_trainer(args, device_id, model, optim)
     trainer.train(train_iter_fct, args.train_steps)
 
 
+def main(args):
+    current_time = time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime())
+    args.log_file = '%s_%s_%s' % (args.log_file, args.mode, current_time)
+    init_logger(args.log_file)
+    logger.info(args)
 
-if __name__ == '__main__':
-    args = parser.parse_args()
     args.gpu_ranks = [int(i) for i in args.gpu_ranks.split(',')]
     os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_gpus
-
     device = "cpu" if args.visible_gpus == '-1' else "cuda"
     device_id = 0 if device == "cuda" else -1
 
-
     if(args.world_size>1):
-        multi_main(args)
+        distributed.multi_main(train, args)
     elif (args.mode == 'train'):
         train(args, device_id)
-    elif (args.mode == 'validate'):
-        wait_and_validate(args, device_id)
-    elif (args.mode == 'lead'):
-        baseline(args, cal_lead=True)
-    elif (args.mode == 'oracle'):
-        baseline(args, cal_oracle=True)
+    #elif (args.mode == 'validate'):
     elif (args.mode == 'test'):
         cp = args.test_from
         try:
             step = int(cp.split('.')[-2].split('_')[-1])
         except:
             step = 0
-        test(args, device_id, cp, step)
+        evaluate(args, device_id, cp, step, mode='test')
+
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    main(args)
