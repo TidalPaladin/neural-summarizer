@@ -1,8 +1,9 @@
 #!/bin/sh
 docker-compose run bertsum \
 		--mode train \
-		--encoder bertsum \
+		--encoder bertsum2 \
 		--dropout 0.1 \
+		--optim 'adam' \
 		--learning_rate 1e-3 \
 		--visible_gpus 1 \
 		--gpu_ranks 0 \
@@ -15,4 +16,4 @@ docker-compose run bertsum \
 		--accum_count 2 \
 		--heads 8 \
 		--use_interval true \
-		--warmup_steps 10000
+		--warmup_steps 10000 \
