@@ -3,11 +3,10 @@ import os
 import signal
 import time
 
-
 import torch
 from pytorch_pretrained_bert import BertConfig
 
-import onmt.utils.distributed as distributed
+import distributed
 from onmt.utils.logging import logger, init_logger
 
 from flags import parser
@@ -25,7 +24,7 @@ def multi_main(func, args):
 
     # Create a thread to listen for errors in the child processes.
     error_queue = mp.SimpleQueue()
-    error_handler = distributed.ErrorHandler(error_queue)
+    error_handler = ErrorHandler(error_queue)
 
     # Train with multiprocessing.
     procs = []
@@ -41,18 +40,18 @@ def multi_main(func, args):
 
 
 def run(func, args, device_id, error_queue):
-
     """ run process """
     setattr(args, 'gpu_ranks', [int(i) for i in args.gpu_ranks])
 
     try:
-        gpu_rank = distributed.multi_init(device_id, args.world_size, args.gpu_ranks)
-        print('gpu_rank %d' %gpu_rank)
+        gpu_rank = distributed.multi_init(device_id, args.world_size,
+                                          args.gpu_ranks)
+        print('gpu_rank %d' % gpu_rank)
         if gpu_rank != args.gpu_ranks[device_id]:
             raise AssertionError("An error occurred in \
                   Distributed initialization")
 
-        func(args,device_id)
+        func(args, device_id)
     except KeyboardInterrupt:
         pass  # killed by parent, do nothing
     except Exception:
@@ -60,18 +59,18 @@ def run(func, args, device_id, error_queue):
         import traceback
         error_queue.put((args.gpu_ranks[device_id], traceback.format_exc()))
 
+
 class ErrorHandler(object):
     """A class that listens for exceptions in children processes and propagates
     the tracebacks to the parent process."""
-
     def __init__(self, error_queue):
         """ init error handler """
         import signal
         import threading
         self.error_queue = error_queue
         self.children_pids = []
-        self.error_thread = threading.Thread(
-            target=self.error_listener, daemon=True)
+        self.error_thread = threading.Thread(target=self.error_listener,
+                                             daemon=True)
         self.error_thread.start()
         signal.signal(signal.SIGUSR1, self.signal_handler)
 
@@ -129,11 +128,15 @@ def train(args, device_id):
     logger.info('Device %s' % device)
     seed(args.seed, device_id)
 
-    def train_iter_fct(): return data.load(args, 'train', device)
+    def train_iter_fct():
+        return data.load(args, 'train', device)
 
     if args.train_from != '':
         logger.info("Training from checkpoint %s", args.train_from)
-        model, optim = load_model(args, device, load_bert=True, checkpoint=args.train_from)
+        model, optim = load_model(args,
+                                  device,
+                                  load_bert=True,
+                                  checkpoint=args.train_from)
     else:
         logger.info("Training without checkpoint")
         model, optim = load_model(args, device, load_bert=True)
@@ -154,8 +157,8 @@ def main(args):
     device = "cpu" if args.visible_gpus == '-1' else "cuda"
     device_id = 0 if device == "cuda" else -1
 
-    if(args.world_size>1):
-        distributed.multi_main(train, args)
+    if (args.world_size > 1):
+        multi_main(train, args)
     elif (args.mode == 'train'):
         train(args, device_id)
     #elif (args.mode == 'validate'):

@@ -12,7 +12,7 @@ docker-compose run bertsum \
 		--save_checkpoint_steps 1000 \
 		--batch_size 1 \
 		--decay_method noam \
-		--train_steps 50000 \
+		--train_steps 30000 \
 		--accum_count 2 \
 		--heads 8 \
 		--use_interval true \
