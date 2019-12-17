@@ -1,0 +1,27 @@
+version: '2.3'
+
+services:
+
+  bertsum:
+    image: bertsum:latest
+    build:
+      context: ./
+      args:
+        upstream: 1.3-cuda10.1-cudnn7-runtime
+    container_name: bertsum
+    tty: true
+    stdin_open: true
+    ports:
+      - 6006:6006
+    volumes:
+      - type: bind
+        source: ${SRC_DIR}
+        target: /data
+      - type: bind
+        source: ${ARTIFACT_DIR}
+        target: /artifacts
+    runtime: nvidia
+    # Env vars are read from .env file
+    environment:
+      - SRC_DIR=/data
+      - ARTIFACT_DIR=/artifacts
